@@ -1,175 +1,102 @@
-from decimal import Decimal
-from typing import Optional, Annotated, Self
-from pydantic import BaseModel, Field, StringConstraints, field_validator, model_validator
 import re
-
+from decimal import Decimal, ROUND_HALF_UP
+from typing import Optional, Annotated
+# Python 3.10 compatibility ke liye ye zaroori hai
+from typing_extensions import Self 
+from pydantic import BaseModel, Field, StringConstraints, field_validator, model_validator
 
 class PaymentRequest(BaseModel):
-    """Validate payment request data"""
-    amount: Decimal = Field(..., gt=0, le=100000)
-    currency: str = Field(..., min_length=3, max_length=3)
+    """Store Bot Payment Validation (INR Focus)"""
+    # .env ke limits: Min 10, Max 50,000
+    amount: Decimal = Field(..., gt=0, le=50000)
+    currency: str = Field("INR", min_length=3, max_length=3)
     provider: str = Field(..., pattern="^(telegram|stars|cryptopay|fiat)$")
 
     @field_validator('amount')
     @classmethod
     def validate_amount(cls, v: Decimal) -> Decimal:
-        if v <= 0:
-            raise ValueError('Amount must be positive')
-        # Prevent too precise amounts (max 2 decimal places)
-        if v.as_tuple().exponent < -2:
-            raise ValueError('Amount can have maximum 2 decimal places')
+        if v < Decimal("10"):
+            raise ValueError('Minimum payment ₹10 honi chahiye')
+        
+        # Check for fractional paise (Max 2 decimal places allowed)
+        # e.g., 10.50 is OK, 10.555 is NOT OK
+        if abs(v.as_tuple().exponent) > 2:
+            raise ValueError('Amount mein 2 se zyada decimal places nahi ho sakte')
         return v
 
-
 class ItemPurchaseRequest(BaseModel):
-    """Validate item purchase request"""
+    """Validate TG Account / Digital Item Purchase"""
     item_name: Annotated[str, StringConstraints(min_length=1, max_length=100, strip_whitespace=True)]
     user_id: int = Field(..., gt=0)
 
     @field_validator('item_name')
     @classmethod
     def validate_item_name(cls, v: str) -> str:
-        # Block control characters (0x00-0x1F, 0x7F)
-        if re.search(r'[\x00-\x1f\x7f]', v):
-            raise ValueError('Invalid characters in item name')
+        # XSS ya Control characters block karne ke liye
+        if re.search(r'[\x00-\x1f\x7f<>]', v):
+            raise ValueError('Item name mein invalid characters hain')
         return v
 
-
 class UserDataUpdate(BaseModel):
-    """Validate user data updates"""
+    """Update User Balance and Stats"""
     telegram_id: int = Field(..., gt=0)
     balance: Optional[Decimal] = Field(None, ge=0, le=1000000)
-
-    # Removed role_id as it's not used in the current implementation
 
     @field_validator('balance')
     @classmethod
     def validate_balance(cls, v: Optional[Decimal]) -> Optional[Decimal]:
-        if v is not None and v < 0:
-            raise ValueError('Balance cannot be negative')
+        if v is not None:
+            return v.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         return v
 
-
-class CategoryRequest(BaseModel):
-    """Validate category operations"""
-    name: Annotated[str, StringConstraints(min_length=1, max_length=100, strip_whitespace=True)]
-
-    def sanitize_name(self) -> str:
-        """Sanitize the category name"""
-        # Remove any HTML/script tags
-        v = re.sub(r'<[^>]*>', '', self.name)
-        # Remove multiple spaces
-        v = re.sub(r'\s+', ' ', v)
-        return v.strip()
-
-
 class BroadcastMessage(BaseModel):
-    """Validate broadcast message"""
+    """Validate HTML Broadcasts for Channel/Users"""
     text: Annotated[str, StringConstraints(min_length=1, max_length=4096)]
     parse_mode: Optional[str] = Field("HTML", pattern="^(HTML|Markdown|MarkdownV2)$")
 
     @model_validator(mode='after')
     def validate_html_tags(self) -> Self:
-        """Validate HTML tags after all fields are set"""
         if self.parse_mode == 'HTML':
-            # Basic HTML validation - check for balanced tags
+            # Strict tag matching logic
             allowed_tags = ['b', 'i', 'u', 's', 'code', 'pre', 'a']
-
-            # Simple check for unclosed tags
             for tag in allowed_tags:
-                open_count = self.text.count(f'<{tag}>')
-                # Also check for tags with attributes
-                open_with_attrs = self.text.count(f'<{tag} ')
-                total_open = open_count + open_with_attrs
-                close_count = self.text.count(f'</{tag}>')
-
-                if total_open != close_count:
-                    raise ValueError(f'Unbalanced HTML tag: {tag}')
+                # Count <tag> and <tag attr=...>
+                opened = len(re.findall(f'<{tag}(?:\s+[^>]*)?>', self.text))
+                closed = self.text.count(f'</{tag}>')
+                if opened != closed:
+                    raise ValueError(f'HTML Tag "{tag}" sahi se close nahi kiya gaya hai')
         return self
 
-
 class PromoCodeRequest(BaseModel):
-    """Validate promo code input"""
-    code: Annotated[str, StringConstraints(min_length=1, max_length=50, strip_whitespace=True)]
+    """Validate Store Promo Codes"""
+    code: Annotated[str, StringConstraints(min_length=3, max_length=20, strip_whitespace=True)]
 
     @field_validator('code')
     @classmethod
     def validate_code(cls, v: str) -> str:
-        v = v.upper().strip()
-        if re.search(r'[^\w\-]', v):
-            raise ValueError('Promo code can only contain letters, digits, and hyphens')
+        v = v.upper()
+        if not re.match(r'^[A-Z0-9_]+$', v):
+            raise ValueError('Promo code mein sirf A-Z, 0-9 aur Underscore allowed hai')
         return v
 
+# --- Utility Functions for Global Use ---
 
-class ReviewRequest(BaseModel):
-    """Validate review input"""
-    rating: int = Field(..., ge=1, le=5)
-    text: Optional[Annotated[str, StringConstraints(max_length=500)]] = None
-
-
-class SearchQuery(BaseModel):
-    """Validate search queries"""
-    query: Annotated[str, StringConstraints(min_length=1, max_length=255, strip_whitespace=True)]
-    limit: int = Field(10, ge=1, le=100)
-
-    # Removed offset as it's not used in the current implementation
-
-    def sanitize_query(self, v: str) -> str:
-        """Sanitize the search query"""
-        # Remove special characters that could break search
-        v = re.sub(r'[^\w\s\-.]', '', v)
-        return v.strip()
-
-
-# Helper functions for validation
 def validate_telegram_id(telegram_id) -> int:
-    """Validate and convert telegram ID"""
+    """Safe conversion for Telegram IDs"""
     try:
         tid = int(telegram_id)
-        if tid <= 0:
-            raise ValueError("Telegram ID must be positive")
-        if tid > 9999999999:  # Max reasonable telegram ID
-            raise ValueError("Invalid telegram ID")
-        return tid
-    except (ValueError, TypeError) as e:
-        raise ValueError(f"Invalid telegram ID: {e}")
+        if 10000 <= tid <= 9999999999: # Standard range
+            return tid
+        raise ValueError
+    except (ValueError, TypeError):
+        raise ValueError("Invalid Telegram ID format")
 
-
-def validate_money_amount(amount, min_amount: Decimal = Decimal("0.01"),
-                          max_amount: Decimal = Decimal("1000000")) -> Decimal:
-    """Validate money amount"""
+def validate_money_amount(amount) -> Decimal:
+    """Standardize money input to 2 decimal places"""
     try:
-        decimal_amount = Decimal(str(amount))
-
-        if decimal_amount < min_amount:
-            raise ValueError(f"Amount must be at least {min_amount}")
-        if decimal_amount > max_amount:
-            raise ValueError(f"Amount cannot exceed {max_amount}")
-
-        # Round to 2 decimal places
-        return decimal_amount.quantize(Decimal("0.01"))
-    except Exception as e:
-        raise ValueError(f"Invalid amount: {e}")
-
-
-def sanitize_html(text: str) -> str:
-    """Sanitize HTML for safe display"""
-    # Escape dangerous characters
-    text = text.replace('&', '&amp;')
-    text = text.replace('<', '&lt;')
-    text = text.replace('>', '&gt;')
-    text = text.replace('"', '&quot;')
-    text = text.replace("'", '&#39;')
-
-    # Allow only safe tags back
-    safe_tags = {
-        '&lt;b&gt;': '<b>', '&lt;/b&gt;': '</b>',
-        '&lt;i&gt;': '<i>', '&lt;/i&gt;': '</i>',
-        '&lt;u&gt;': '<u>', '&lt;/u&gt;': '</u>',
-        '&lt;code&gt;': '<code>', '&lt;/code&gt;': '</code>',
-    }
-
-    for escaped, original in safe_tags.items():
-        text = text.replace(escaped, original)
-
-    return text
+        d = Decimal(str(amount)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        if d < Decimal("0.01"):
+            raise ValueError("Amount too small")
+        return d
+    except Exception:
+        raise ValueError("Invalid amount format")
