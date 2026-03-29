@@ -5,9 +5,24 @@ from typing import Optional, Annotated
 from typing_extensions import Self 
 from pydantic import BaseModel, Field, StringConstraints, field_validator, model_validator
 
+# --- YEH CLASS ADD KI GAYI HAI ---
+class CategoryRequest(BaseModel):
+    """Validate Product Categories"""
+    name: Annotated[str, StringConstraints(min_length=2, max_length=50, strip_whitespace=True)]
+    description: Optional[str] = Field(None, max_length=200)
+    is_active: bool = Field(True)
+
+    @field_validator('name')
+    @classmethod
+    def validate_category_name(cls, v: str) -> str:
+        # Sirf alphanumeric aur spaces allow karne ke liye
+        if not re.match(r'^[a-zA-Z0-9\s]+$', v):
+            raise ValueError('Category name mein sirf letters, numbers aur spaces allowed hain')
+        return v
+# --------------------------------
+
 class PaymentRequest(BaseModel):
     """Store Bot Payment Validation (INR Focus)"""
-    # .env ke limits: Min 10, Max 50,000
     amount: Decimal = Field(..., gt=0, le=50000)
     currency: str = Field("INR", min_length=3, max_length=3)
     provider: str = Field(..., pattern="^(telegram|stars|cryptopay|fiat)$")
@@ -17,9 +32,6 @@ class PaymentRequest(BaseModel):
     def validate_amount(cls, v: Decimal) -> Decimal:
         if v < Decimal("10"):
             raise ValueError('Minimum payment ₹10 honi chahiye')
-        
-        # Check for fractional paise (Max 2 decimal places allowed)
-        # e.g., 10.50 is OK, 10.555 is NOT OK
         if abs(v.as_tuple().exponent) > 2:
             raise ValueError('Amount mein 2 se zyada decimal places nahi ho sakte')
         return v
@@ -32,7 +44,6 @@ class ItemPurchaseRequest(BaseModel):
     @field_validator('item_name')
     @classmethod
     def validate_item_name(cls, v: str) -> str:
-        # XSS ya Control characters block karne ke liye
         if re.search(r'[\x00-\x1f\x7f<>]', v):
             raise ValueError('Item name mein invalid characters hain')
         return v
@@ -57,10 +68,8 @@ class BroadcastMessage(BaseModel):
     @model_validator(mode='after')
     def validate_html_tags(self) -> Self:
         if self.parse_mode == 'HTML':
-            # Strict tag matching logic
             allowed_tags = ['b', 'i', 'u', 's', 'code', 'pre', 'a']
             for tag in allowed_tags:
-                # Count <tag> and <tag attr=...>
                 opened = len(re.findall(f'<{tag}(?:\s+[^>]*)?>', self.text))
                 closed = self.text.count(f'</{tag}>')
                 if opened != closed:
@@ -79,20 +88,17 @@ class PromoCodeRequest(BaseModel):
             raise ValueError('Promo code mein sirf A-Z, 0-9 aur Underscore allowed hai')
         return v
 
-# --- Utility Functions for Global Use ---
-
+# --- Utility Functions ---
 def validate_telegram_id(telegram_id) -> int:
-    """Safe conversion for Telegram IDs"""
     try:
         tid = int(telegram_id)
-        if 10000 <= tid <= 9999999999: # Standard range
+        if 10000 <= tid <= 9999999999:
             return tid
         raise ValueError
     except (ValueError, TypeError):
         raise ValueError("Invalid Telegram ID format")
 
 def validate_money_amount(amount) -> Decimal:
-    """Standardize money input to 2 decimal places"""
     try:
         d = Decimal(str(amount)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         if d < Decimal("0.01"):
